@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Grid with Cells</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            width: 100%;
+            overflow: hidden;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: 1fr 1fr;
+            width: 100%;
+            height: 100%;
+            border-collapse: collapse;
+        }
+        .grid div {
+            border: 2px solid #333; /* Border added */
+            background-color: #fff; /* Default white background */
+            box-sizing: border-box; /* Include padding and border in total width and height */
+        }
+        /* Remove double borders */
+        .grid div:nth-child(odd) {
+            border-right: none;
+        }
+        .grid div:nth-child(2n) {
+            border-left: none;
+        }
+        .grid div:nth-child(1), .grid div:nth-child(2) {
+            border-bottom: none;
+        }
+        .grid div:nth-child(3), .grid div:nth-child(4) {
+            border-top: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="grid">
+        <div></div>
+        <div></div>
+        <div></div>
+        <div></div>
+    </div>
+
+    <script>
+        const createGrid = (parent) => {
+            const grid = document.createElement('div');
+            grid.classList.add('grid');
+            
+            for (let i = 0; i < 4; i++) {
+                const div = document.createElement('div');
+                grid.appendChild(div);
+            }
+            
+            parent.appendChild(grid);
+            addListenersToCells(grid.querySelectorAll('div'));
+        }
+
+        const addListenersToCells = (cells) => {
+            cells.forEach(cell => {
+                cell.addEventListener('mouseover', () => {
+                    if (!cell.firstChild) {
+                        cell.style.backgroundColor = 'red';
+                    }
+                });
+                cell.addEventListener('mouseout', (e) => {
+                    if (!e.target.firstChild && e.target.style.backgroundColor === 'red') {
+                        e.target.style.backgroundColor = '#fff';
+                    }
+                });
+                cell.addEventListener('click', () => {
+                    if (!cell.firstChild) {
+                        cell.innerHTML = '';
+                        createGrid(cell);
+                    }
+                });
+            });
+        }
+
+        const initialCells = document.querySelectorAll('.grid div');
+        addListenersToCells(initialCells);
+    </script>
+</body>
+</html>
