@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Simplified Grow-Shrink Void Filling</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; }
+        canvas { display: block; }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            border-radius: 5px;
+            color: white;
+            font-family: sans-serif;
+            font-size: 12px;
+        }
+        #controls label { display: block; margin-bottom: 5px;}
+        #controls input[type="range"] { margin-bottom: 10px; width: 180px;}
+        #controls input[type="checkbox"] { margin-bottom: 10px; vertical-align: middle;}
+        #controls .checkbox-label { display: inline-block; margin-left: 5px; vertical-align: middle;}
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <label for="pointSize">Original Point Size:</label>
+        <input type="range" id="pointSize" min="1" max="200" value="2">
+
+        <label for="grownPointSize1">Grow Size 1 (Initial Dilation):</label>
+        <input type="range" id="grownPointSize1" min="5" max="100" value="25">
+
+        <label for="shrinkAmount">Shrink Amount (Erosion Kernel):</label>
+        <input type="range" id="shrinkAmount" min="0" max="500" value="1">
+
+        <label for="postErosionDilationAmount">Post-Erosion Dilation Kernel:</label>
+        <input type="range" id="postErosionDilationAmount" min="0" max="5" value="1">
+
+        <label for="colorSpreadSize">Color Spread Size (for Fill):</label>
+        <input type="range" id="colorSpreadSize" min="3" max="80" value="15">
+
+        <div>
+            <input type="checkbox" id="usePointColorFill" checked>
+            <label for="usePointColorFill" class="checkbox-label">Use Point Color for Fill</label>
+        </div>
+
+        <label for="numPoints">Number of Points:</label>
+        <input type="range" id="numPoints" min="500" max="10000" step="100" value="2000">
+
+        <label for="darkThreshold">Dark Threshold (Original):</label>
+        <input type="range" id="darkThreshold" min="0.01" max="0.5" step="0.01" value="0.05">
+
+        </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        let scene, camera, renderer;
+        let pointsObject;
+        let originalPointsMaterial, grownMask1Material, coloredGrownPointsMaterial, erosionMaterial, dilationMaterial;
+
+        let rtScene, rtCamera;
+        let FinalCompositeMaterial;
+        let rtOriginalPoints, rtGrownMask1, rtErodedIntermediate, rtFinalProcessedMask, rtColoredGrownPoints;
+        let fullScreenQuad;
+
+        const pointSizeSlider = document.getElementById('pointSize');
+        const grownPointSize1Slider = document.getElementById('grownPointSize1');
+        const shrinkAmountSlider = document.getElementById('shrinkAmount');
+        const postErosionDilationSlider = document.getElementById('postErosionDilationAmount');
+        const colorSpreadSizeSlider = document.getElementById('colorSpreadSize'); // Renamed from grownPointSize2
+        const usePointColorFillCheckbox = document.getElementById('usePointColorFill');
+        const numPointsSlider = document.getElementById('numPoints');
+        const darkThresholdSlider = document.getElementById('darkThreshold');
+        // depthEpsilonSlider removed
+
+
+        // Pass 1 Shaders: Original Points
+        const originalPointVertexShader = `
+            varying vec3 vColor; uniform float u_pointSize;
+            void main() { vColor = color; vec4 mvPosition = modelViewMatrix * vec4(position, 1.0); gl_Position = projectionMatrix * mvPosition; gl_PointSize = u_pointSize; }
+        `;
+        const originalPointFragmentShader = `
+            varying vec3 vColor;
+            void main() { if (length(gl_PointCoord - vec2(0.5)) > 0.5) discard; gl_FragColor = vec4(vColor, 1.0); }
+        `;
+
+        // Pass 2 Shaders: Initial Grown Mask (White)
+        const grownMask1VertexShader = `
+            uniform float u_grownPointSize1;
+            void main() { vec4 mvPosition = modelViewMatrix * vec4(position, 1.0); gl_Position = projectionMatrix * mvPosition; gl_PointSize = u_grownPointSize1; }
+        `;
+        const grownMask1FragmentShader = `
+            void main() { if (length(gl_PointCoord - vec2(0.5)) > 0.5) discard; gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0); }
+        `;
+
+        // Common Post-Process Vertex Shader
+        const postProcessVertexShader = `
+            varying vec2 vUv;
+            void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+        `;
+
+        // Pass 3 Shader: Erosion
+        const erosionFragmentShader = `
+            uniform sampler2D tDiffuse; uniform vec2 u_resolution; uniform float u_kernelAmount; varying vec2 vUv;
+            void main() {
+                if (u_kernelAmount < 0.5) { gl_FragColor = texture2D(tDiffuse, vUv); return; }
+                vec2 texelSize = 1.0 / u_resolution; float isForeground = 1.0;
+                for (float y = -u_kernelAmount; y <= u_kernelAmount; y += 1.0) {
+                    for (float x = -u_kernelAmount; x <= u_kernelAmount; x += 1.0) {
+                        if (texture2D(tDiffuse, vUv + vec2(x, y) * texelSize).r < 0.5) { isForeground = 0.0; break; }
+                    } if (isForeground == 0.0) break;
+                } gl_FragColor = vec4(vec3(isForeground), 1.0);
+            }
+        `;
+
+        // Pass 4 Shader: Dilation
+        const dilationFragmentShader = `
+            uniform sampler2D tDiffuse; uniform vec2 u_resolution; uniform float u_kernelAmount; varying vec2 vUv;
+            void main() {
+                if (u_kernelAmount < 0.5) { gl_FragColor = texture2D(tDiffuse, vUv); return; }
+                vec2 texelSize = 1.0 / u_resolution; float isBackground = 1.0;
+                for (float y = -u_kernelAmount; y <= u_kernelAmount; y += 1.0) {
+                    for (float x = -u_kernelAmount; x <= u_kernelAmount; x += 1.0) {
+                        if (texture2D(tDiffuse, vUv + vec2(x, y) * texelSize).r > 0.5) { isBackground = 0.0; break; }
+                    } if (isBackground == 0.0) break;
+                } gl_FragColor = vec4(vec3(1.0 - isBackground), 1.0);
+            }
+        `;
+
+        // Pass 5 Shaders: Colored Grown Points (for color sampling)
+        const coloredGrownPointsVertexShader = `
+            varying vec3 vColor; uniform float u_colorSpreadSize;
+            void main() { vColor = color; vec4 mvPosition = modelViewMatrix * vec4(position, 1.0); gl_Position = projectionMatrix * mvPosition; gl_PointSize = u_colorSpreadSize; }
+        `;
+        const coloredGrownPointsFragmentShader = ` // Same as originalPointFragmentShader, just uses vColor
+            varying vec3 vColor;
+            void main() { if (length(gl_PointCoord - vec2(0.5)) > 0.5) discard; gl_FragColor = vec4(vColor, 1.0); }
+        `;
+
+
+        // Pass 6 Shader: Final Composite
+        const finalCompositeFragmentShader = `
+            uniform sampler2D tOriginalPoints;
+            uniform sampler2D tFinalProcessedMask;
+            uniform sampler2D tColoredGrownPoints; // Source for colored fill
+            uniform float u_darkThreshold;
+            uniform bool u_usePointColorForFill;
+            varying vec2 vUv;
+
+            void main() {
+                vec4 originalColor = texture2D(tOriginalPoints, vUv);
+                float finalMaskValue = texture2D(tFinalProcessedMask, vUv).r;
+                vec4 colorForFillAttempt = texture2D(tColoredGrownPoints, vUv);
+
+                bool isOriginalPoint = originalColor.a > 0.5 && (originalColor.r + originalColor.g + originalColor.b) > u_darkThreshold;
+
+                if (isOriginalPoint) {
+                    gl_FragColor = originalColor;
+                } else if (finalMaskValue > 0.5) { // Inside the processed mask
+                    if (u_usePointColorForFill) {
+                        // If the colored grown points pass rendered something here (alpha > ~0), use its color
+                        if (colorForFillAttempt.a > 0.1) {
+                             gl_FragColor = vec4(colorForFillAttempt.rgb, 1.0); // Ensure full alpha for fill
+                        } else {
+                             gl_FragColor = vec4(finalMaskValue, finalMaskValue, finalMaskValue, 1.0); // Fallback to white
+                        }
+                    } else {
+                        gl_FragColor = vec4(finalMaskValue, finalMaskValue, finalMaskValue, 1.0); // Default white fill
+                    }
+                } else {
+                    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); // Background
+                }
+            }
+        `;
+
+        function createPointCloudGeometry(count) { /* ... same as before ... */
+            let oldGeometry = pointsObject ? pointsObject.geometry : null;
+            const newGeometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(count * 3); const colors = new Float32Array(count * 3);
+            const clusters = [
+                { center: new THREE.Vector3(-10,0,0), numPointsPerCluster: Math.floor(count*0.25), color: new THREE.Color(0xff0000) },
+                { center: new THREE.Vector3(10,5,-5), numPointsPerCluster: Math.floor(count*0.30), color: new THREE.Color(0x00ff00) },
+                { center: new THREE.Vector3(0,-8,5), numPointsPerCluster: Math.floor(count*0.20), color: new THREE.Color(0x0000ff) },
+                { center: new THREE.Vector3(5,10,10), numPointsPerCluster: Math.floor(count*0.25), color: new THREE.Color(0xffff00) }
+            ];
+            let currentPoint = 0;
+            clusters.forEach(cluster => {
+                for (let i = 0; i < cluster.numPointsPerCluster && currentPoint < count; i++) {
+                    const x = cluster.center.x + (Math.random() - 0.5) * 10; const y = cluster.center.y + (Math.random() - 0.5) * 10; const z = cluster.center.z + (Math.random() - 0.5) * 10;
+                    positions[currentPoint*3]=x; positions[currentPoint*3+1]=y; positions[currentPoint*3+2]=z;
+                    colors[currentPoint*3]=cluster.color.r; colors[currentPoint*3+1]=cluster.color.g; colors[currentPoint*3+2]=cluster.color.b;
+                    currentPoint++;
+                }
+            });
+            newGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            newGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            if (pointsObject) { pointsObject.geometry = newGeometry; }
+            if (oldGeometry) { oldGeometry.dispose(); }
+            return newGeometry;
+        }
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.z = 35;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setClearColor(0x000000, 1); document.body.appendChild(renderer.domElement);
+
+            const controls = new OrbitControls(camera, renderer.domElement); controls.enableDamping = true;
+
+            originalPointsMaterial = new THREE.ShaderMaterial({
+                uniforms: { u_pointSize: { value: parseFloat(pointSizeSlider.value) } },
+                vertexShader: originalPointVertexShader, fragmentShader: originalPointFragmentShader,
+                vertexColors: true, transparent: false,
+            });
+            grownMask1Material = new THREE.ShaderMaterial({
+                uniforms: { u_grownPointSize1: { value: parseFloat(grownPointSize1Slider.value) } },
+                vertexShader: grownMask1VertexShader, fragmentShader: grownMask1FragmentShader, transparent: false,
+            });
+            erosionMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    tDiffuse: { value: null }, u_resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+                    u_kernelAmount: { value: parseFloat(shrinkAmountSlider.value) }
+                }, vertexShader: postProcessVertexShader, fragmentShader: erosionFragmentShader,
+            });
+            dilationMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    tDiffuse: { value: null }, u_resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+                    u_kernelAmount: { value: parseFloat(postErosionDilationSlider.value) }
+                }, vertexShader: postProcessVertexShader, fragmentShader: dilationFragmentShader,
+            });
+            coloredGrownPointsMaterial = new THREE.ShaderMaterial({ // Was depthAwareGrownMaterial
+                uniforms: {
+                    u_colorSpreadSize: { value: parseFloat(colorSpreadSizeSlider.value) }, // Was u_grownPointSize2
+                    // No depth texture or epsilon needed here anymore
+                },
+                vertexShader: coloredGrownPointsVertexShader, fragmentShader: coloredGrownPointsFragmentShader,
+                vertexColors: true, transparent: true, // Transparent to allow discards to clear to alpha 0
+                depthTest: true, depthWrite: true, // Standard depth behavior for this pass
+            });
+
+            pointsObject = new THREE.Points(); scene.add(pointsObject);
+            createPointCloudGeometry(parseInt(numPointsSlider.value));
+
+            rtCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+            rtScene = new THREE.Scene();
+            const quadGeometry = new THREE.PlaneGeometry(2, 2);
+            fullScreenQuad = new THREE.Mesh(quadGeometry); rtScene.add(fullScreenQuad);
+
+            // rtOriginalPoints still needs depthTexture if we want to be super precise in final composite,
+            // but for this simplified approach, it's less critical for the colored grown points pass.
+            // However, keeping it doesn't hurt and allows future refinement.
+            rtOriginalPoints = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
+                minFilter: THREE.LinearFilter, magFilter: THREE.NearestFilter, format: THREE.RGBAFormat,
+                depthTexture: new THREE.DepthTexture(window.innerWidth, window.innerHeight, THREE.UnsignedIntType)
+            });
+            rtOriginalPoints.depthTexture.format = THREE.DepthFormat; rtOriginalPoints.depthTexture.type = THREE.UnsignedIntType;
+
+            const rtParametersBasic = { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat, stencilBuffer: false };
+            rtGrownMask1 = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, rtParametersBasic);
+            rtErodedIntermediate = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, rtParametersBasic);
+            rtFinalProcessedMask = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, rtParametersBasic);
+            rtColoredGrownPoints = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, rtParametersBasic); // Was rtGrownPointsDepthAware
+
+            FinalCompositeMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    tOriginalPoints: { value: rtOriginalPoints.texture },
+                    tFinalProcessedMask: { value: rtFinalProcessedMask.texture },
+                    tColoredGrownPoints: { value: rtColoredGrownPoints.texture }, // Updated
+                    u_darkThreshold: { value: parseFloat(darkThresholdSlider.value) },
+                    u_usePointColorForFill: { value: usePointColorFillCheckbox.checked }
+                }, vertexShader: postProcessVertexShader, fragmentShader: finalCompositeFragmentShader
+            });
+
+            pointSizeSlider.addEventListener('input', e => originalPointsMaterial.uniforms.u_pointSize.value = parseFloat(e.target.value));
+            grownPointSize1Slider.addEventListener('input', e => grownMask1Material.uniforms.u_grownPointSize1.value = parseFloat(e.target.value));
+            shrinkAmountSlider.addEventListener('input', e => erosionMaterial.uniforms.u_kernelAmount.value = parseFloat(e.target.value));
+            postErosionDilationSlider.addEventListener('input', e => dilationMaterial.uniforms.u_kernelAmount.value = parseFloat(e.target.value));
+            colorSpreadSizeSlider.addEventListener('input', e => coloredGrownPointsMaterial.uniforms.u_colorSpreadSize.value = parseFloat(e.target.value));
+            usePointColorFillCheckbox.addEventListener('change', e => FinalCompositeMaterial.uniforms.u_usePointColorForFill.value = e.target.checked);
+            numPointsSlider.addEventListener('input', e => createPointCloudGeometry(parseInt(e.target.value)));
+            darkThresholdSlider.addEventListener('input', e => FinalCompositeMaterial.uniforms.u_darkThreshold.value = parseFloat(e.target.value));
+            // depthEpsilonSlider listener removed
+
+            window.addEventListener('resize', onWindowResize, false); onWindowResize();
+        }
+
+        function onWindowResize() {
+            const width = window.innerWidth; const height = window.innerHeight;
+            camera.aspect = width / height; camera.updateProjectionMatrix(); renderer.setSize(width, height);
+            rtOriginalPoints.setSize(width, height); rtGrownMask1.setSize(width, height);
+            rtErodedIntermediate.setSize(width, height); rtFinalProcessedMask.setSize(width, height);
+            rtColoredGrownPoints.setSize(width, height); // Resize new RT
+            if(erosionMaterial) erosionMaterial.uniforms.u_resolution.value.set(width, height);
+            if(dilationMaterial) dilationMaterial.uniforms.u_resolution.value.set(width, height);
+            // No resolution needed for coloredGrownPointsMaterial if not doing screen-space effects in its shader
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Pass 1: Original Points + Depth
+            pointsObject.material = originalPointsMaterial;
+            renderer.setRenderTarget(rtOriginalPoints); renderer.setClearColor(0x000000, 1.0); renderer.clear();
+            renderer.render(scene, camera);
+
+            // Pass 2: Initial Grow (Dilation) for Mask
+            pointsObject.material = grownMask1Material;
+            renderer.setRenderTarget(rtGrownMask1); renderer.setClearColor(0x000000, 1.0); renderer.clear();
+            renderer.render(scene, camera);
+
+            // Pass 3: Erode rtGrownMask1 -> rtErodedIntermediate
+            erosionMaterial.uniforms.tDiffuse.value = rtGrownMask1.texture;
+            fullScreenQuad.material = erosionMaterial;
+            renderer.setRenderTarget(rtErodedIntermediate); renderer.setClearColor(0x000000, 0.0); renderer.clear();
+            renderer.render(rtScene, rtCamera);
+
+            // Pass 4: Dilate rtErodedIntermediate -> rtFinalProcessedMask
+            dilationMaterial.uniforms.tDiffuse.value = rtErodedIntermediate.texture;
+            fullScreenQuad.material = dilationMaterial;
+            renderer.setRenderTarget(rtFinalProcessedMask); renderer.setClearColor(0x000000, 0.0); renderer.clear();
+            renderer.render(rtScene, rtCamera);
+
+            // Pass 5: Colored Grown Points (for color sampling)
+            pointsObject.material = coloredGrownPointsMaterial;
+            renderer.setRenderTarget(rtColoredGrownPoints); renderer.setClearColor(0x000000, 0.0); renderer.clear(); // Clear to transparent black
+            renderer.render(scene, camera);
+
+            // Pass 6: Final Composite
+            // Uniforms for FinalCompositeMaterial are mostly set in init, tFinalProcessedMask is correct.
+            // tColoredGrownPoints is also correct from init.
+            fullScreenQuad.material = FinalCompositeMaterial;
+            renderer.setRenderTarget(null); renderer.setClearColor(0x000000, 1); renderer.clear();
+            renderer.render(rtScene, rtCamera);
+        }
+        init(); animate();
+    </script>
+</body>
+</html>
