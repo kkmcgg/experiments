@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Square Points</title>
+  <style>
+    canvas {
+      border: 1px solid #333;
+      display: block;
+      margin: 20px auto;
+      background-color: #f0f0f0;
+    }
+    .controls {
+      text-align: center;
+      margin: 10px;
+    }
+    button {
+      margin: 0 5px;
+    }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <button onclick="decreaseIterations()">&lt;&lt;</button>
+    <span id="iterationCount">5</span>
+    <button onclick="increaseIterations()">&gt;&gt;</button>
+    <button onclick="toggleBoxes()">Toggle Boxes</button>
+  </div>
+  <canvas id="squareCanvas" width="400" height="400"></canvas>
+
+  <script>
+    const canvas = document.getElementById('squareCanvas');
+    const ctx = canvas.getContext('2d');
+    const iterationDisplay = document.getElementById('iterationCount');
+    let showBoxes = true;
+    let iterations = 5;
+    let selectedPoint = null;
+
+    const squareSize = 100;
+    const allBoxCenters = [];
+
+    const colors = ['black', 'red', 'blue', 'green', 'purple', 'orange', 'brown', 'cyan', 'magenta'];
+    const offsets = [
+      [0, 0], [50, 50], [-25, 25], [-12.5, -12.5], [6.25, -6.25],
+      [-3.125, 3.125], [1.5625, -1.5625], [-0.78125, 0.78125], [0.390625, -0.390625]
+    ];
+
+    const drawPoints = (points, color) => {
+      ctx.fillStyle = color;
+      ctx.strokeStyle = color;
+      points.forEach(p => {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+        ctx.fill();
+        if (showBoxes) {
+          ctx.strokeRect(p.x - squareSize / 2, p.y - squareSize / 2, squareSize, squareSize);
+        }
+      });
+    };
+
+    const shiftPoints = (points, dx, dy) => points.map(p => ({ x: p.x + dx, y: p.y + dy }));
+
+    const drawAll = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      allBoxCenters.length = 0;
+
+      let allPoints = [
+        { x: 100, y: 100 },
+        { x: 200, y: 100 },
+        { x: 100, y: 200 },
+        { x: 200, y: 200 }
+      ];
+
+      for (let i = 0; i < iterations && i < offsets.length; i++) {
+        const [dx, dy] = offsets[i];
+        const newPoints = shiftPoints(allPoints, dx, dy);
+        drawPoints(newPoints, colors[i % colors.length]);
+        newPoints.forEach(p => allBoxCenters.push({ x: p.x, y: p.y, iteration: i + 1 }));
+        allPoints = allPoints.concat(newPoints);
+      }
+
+      if (selectedPoint) {
+        const intersectingBoxes = allBoxCenters.filter(box =>
+          selectedPoint.x >= box.x - squareSize / 2 &&
+          selectedPoint.x <= box.x + squareSize / 2 &&
+          selectedPoint.y >= box.y - squareSize / 2 &&
+          selectedPoint.y <= box.y + squareSize / 2
+        );
+
+        ctx.globalAlpha = 1 / intersectingBoxes.length;
+        ctx.fillStyle = 'black';
+        intersectingBoxes.forEach(box => {
+          ctx.fillRect(box.x - squareSize / 2, box.y - squareSize / 2, squareSize, squareSize);
+        });
+        ctx.globalAlpha = 1.0;
+
+        ctx.fillStyle = 'black';
+        ctx.beginPath();
+        ctx.arc(selectedPoint.x, selectedPoint.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    };
+
+    canvas.addEventListener('click', e => {
+      const rect = canvas.getBoundingClientRect();
+      selectedPoint = {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top
+      };
+      drawAll();
+    });
+
+    const toggleBoxes = () => {
+      showBoxes = !showBoxes;
+      drawAll();
+    };
+
+    const increaseIterations = () => {
+      if (iterations < offsets.length) iterations++;
+      iterationDisplay.textContent = iterations;
+      drawAll();
+    };
+
+    const decreaseIterations = () => {
+      if (iterations > 1) iterations--;
+      iterationDisplay.textContent = iterations;
+      drawAll();
+    };
+
+    drawAll();
+  </script>
+</body>
+</html>
