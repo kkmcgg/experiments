@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Canvas Draw + TensorFlow.js</title>
+  <style>
+    body { display: flex; flex-direction: column; align-items: center; font-family: sans-serif; }
+    #canvas { border: 1px solid #444; touch-action: none; }
+    #controls { margin-top: 10px; }
+    button { margin: 0 5px; padding: 5px 10px; }
+    #result { margin-top: 10px; }
+  </style>
+</head>
+<body>
+
+  <h2>Draw on Canvas & Classify</h2>
+  <canvas id="canvas" width="300" height="300"></canvas>
+
+  <div id="controls">
+    <button id="clearBtn">Clear</button>
+    <button id="classifyBtn">Classify</button>
+  </div>
+
+  <div id="result">Load model and draw something, then hit “Classify.”</div>
+
+  <!-- TensorFlow.js core -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+  <!-- Pretrained MobileNet model -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet"></script>
+
+  <script>
+    (async function(){
+      // Load the model first
+      const model = await mobilenet.load();
+      document.getElementById('result').innerText = 'Model loaded.';
+
+      // Set up canvas drawing
+      const canvas = document.getElementById('canvas');
+      const ctx = canvas.getContext('2d');
+      ctx.lineWidth = 8;
+      ctx.lineCap = 'round';
+      let drawing = false;
+
+      canvas.addEventListener('pointerdown', e => {
+        drawing = true;
+        ctx.beginPath();
+        ctx.moveTo(e.offsetX, e.offsetY);
+      });
+      canvas.addEventListener('pointermove', e => {
+        if (!drawing) return;
+        ctx.lineTo(e.offsetX, e.offsetY);
+        ctx.stroke();
+      });
+      canvas.addEventListener('pointerup', () => { drawing = false; });
+      canvas.addEventListener('pointerleave', () => { drawing = false; });
+
+      // Clear button
+      document.getElementById('clearBtn').addEventListener('click', () => {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        document.getElementById('result').innerText = 'Canvas cleared.';
+      });
+
+      // Classify button
+      document.getElementById('classifyBtn').addEventListener('click', async () => {
+        document.getElementById('result').innerText = 'Classifying...';
+        // Grab pixels as a tensor
+        const imgTensor = tf.browser.fromPixels(canvas);
+        const predictions = await model.classify(imgTensor);
+        imgTensor.dispose();
+        // Display top 3
+        document.getElementById('result').innerHTML =
+          predictions.map(p => `${p.className}: ${ (p.probability*100).toFixed(2) }%`).join('<br>');
+      });
+    })();
+  </script>
+
+</body>
+</html>
