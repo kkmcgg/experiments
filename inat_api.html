@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Nova Scotia Beech Trees</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <style>
+        body { margin: 0; padding: 0; font-family: sans-serif; }
+        #map { height: 100vh; width: 100%; }
+        #status {
+            position: absolute; top: 10px; right: 10px; z-index: 1000;
+            background: white; padding: 10px; border-radius: 5px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.2);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="status">Initializing...</div>
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <script>
+        // --- CONFIGURATION ---
+        const PLACE_ID = 6853;      // Nova Scotia
+        const TAXON_ID = 49202;     // American Beech
+        const PER_PAGE = 200;       // Max allowed by API
+        
+        // 1. Initialize the Map
+        // Start zoomed out on Nova Scotia
+        const map = L.map('map').setView([45.0, -63.0], 7);
+        
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        const statusDiv = document.getElementById('status');
+        const markersLayer = L.layerGroup().addTo(map);
+
+        // 2. Function to fetch ALL pages
+        async function fetchAllTrees() {
+            let page = 1;
+            let allObservations = [];
+            let keepFetching = true;
+
+            statusDiv.innerText = "Fetching data from iNaturalist...";
+
+            while (keepFetching) {
+                try {
+                    // Construct API URL
+                    const url = `https://api.inaturalist.org/v1/observations?place_id=${PLACE_ID}&taxon_id=${TAXON_ID}&geo=true&quality_grade=research&per_page=${PER_PAGE}&page=${page}`;
+                    
+                    const response = await fetch(url);
+                    const data = await response.json();
+                    
+                    const results = data.results;
+                    
+                    if (results.length === 0) {
+                        keepFetching = false; // Stop if no more results
+                    } else {
+                        allObservations = allObservations.concat(results);
+                        statusDiv.innerText = `Fetched ${allObservations.length} trees...`;
+                        page++;
+                        
+                        // Safety break to prevent infinite loops during testing
+                        if (page > 20) keepFetching = false; 
+                    }
+
+                } catch (err) {
+                    console.error("Fetch error:", err);
+                    statusDiv.innerText = "Error fetching data.";
+                    keepFetching = false;
+                }
+            }
+
+            statusDiv.innerText = `Mapping ${allObservations.length} trees...`;
+            mapData(allObservations);
+        }
+
+        // 3. Function to Map the Data
+        function mapData(observations) {
+            observations.forEach(obs => {
+                if (!obs.geojson) return;
+
+                const lat = obs.geojson.coordinates[1];
+                const lng = obs.geojson.coordinates[0];
+                const imgUrl = obs.photos && obs.photos.length > 0 ? obs.photos[0].url : null;
+                const species = obs.species_guess || "Unknown Tree";
+                const date = obs.observed_on || "Unknown date";
+
+                // Create Popup HTML
+                let popupContent = `<b>${species}</b><br>Date: ${date}`;
+                if (imgUrl) {
+                    popupContent += `<br><img src="${imgUrl}" width="150" style="margin-top:5px; border-radius:4px;">`;
+                }
+                popupContent += `<br><a href="${obs.uri}" target="_blank">View on iNaturalist</a>`;
+
+                // Add Circle Marker (Green Dot)
+                L.circleMarker([lat, lng], {
+                    color: 'forestgreen',
+                    fillColor: '#228B22',
+                    fillOpacity: 0.7,
+                    radius: 6,
+                    weight: 1
+                }).bindPopup(popupContent).addTo(markersLayer);
+            });
+
+            statusDiv.innerText = `Done! Showing ${observations.length} Beech Trees.`;
+        }
+
+        // Run the fetch
+        fetchAllTrees();
+
+    </script>
+</body>
+</html>
